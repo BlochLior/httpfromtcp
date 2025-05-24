@@ -1,6 +1,7 @@
 package request
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -9,7 +10,18 @@ import (
 
 type Request struct {
 	RequestLine RequestLine
+	state       requestState
 }
+
+type requestState int
+
+const (
+	requestStateInitialized requestState = iota
+	requestStateDone
+)
+
+const crlf = "\r\n"
+const bufferSize = 8
 
 type RequestLine struct {
 	HttpVersion   string
@@ -17,43 +29,108 @@ type RequestLine struct {
 	Method        string
 }
 
-func parseRequestLine(fullRequest []byte) (*RequestLine, error) {
-	str := string(fullRequest)
-	partsRaw := strings.Split(str, "\r\n")
-	requestLine := partsRaw[0]
-	parts := strings.Fields(requestLine)
+func RequestFromReader(reader io.Reader) (*Request, error) {
+	buf := make([]byte, bufferSize)
+	readToIndex := 0
+	req := &Request{
+		state: requestStateInitialized,
+	}
+
+	for req.state != requestStateDone {
+		if readToIndex >= len(buf) {
+			newBuf := make([]byte, len(buf)*2)
+			copy(newBuf, buf)
+			buf = newBuf
+		}
+
+		numBytesRead, err := reader.Read(buf[readToIndex:])
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				req.state = requestStateDone
+				break
+			}
+			return nil, err
+		}
+		readToIndex += numBytesRead
+
+		numBytesParsed, err := req.parse(buf[:readToIndex])
+		if err != nil {
+			return nil, err
+		}
+
+		copy(buf, buf[numBytesParsed:])
+		readToIndex -= numBytesParsed
+	}
+	return req, nil
+}
+
+func parseRequestLine(data []byte) (*RequestLine, int, error) {
+	idx := bytes.Index(data, []byte(crlf))
+	if idx == -1 {
+		return nil, 0, nil
+	}
+	requestLineText := string(data[:idx])
+	requestLine, err := requestLineFromString(requestLineText)
+	if err != nil {
+		return nil, 0, err
+	}
+	return requestLine, idx + 2, nil
+}
+
+func requestLineFromString(str string) (*RequestLine, error) {
+	parts := strings.Split(str, " ")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("poorly formatted request-line: %s", str)
+	}
+
 	method := parts[0]
-	if strings.ToUpper(method) != method {
-		fmt.Println("error: method is not capitalized")
-		return nil, errors.New("method is uncapitalized")
+	for _, c := range method {
+		if c < 'A' || c > 'Z' {
+			return nil, fmt.Errorf("invalid method: %s", method)
+		}
 	}
 
 	requestTarget := parts[1]
-	httpVersionRaw := parts[2]
-	if httpVersionRaw != "HTTP/1.1" {
-		fmt.Println("error: http version is not 1.1")
-		return nil, errors.New("unfitting http version")
-	}
-	httpVersion := strings.TrimPrefix(httpVersionRaw, "HTTP/")
-	return &RequestLine{
-		HttpVersion:   httpVersion,
-		RequestTarget: requestTarget,
-		Method:        method,
-	}, nil
 
+	versionParts := strings.Split(parts[2], "/")
+	if len(versionParts) != 2 {
+		return nil, fmt.Errorf("malformed start-line: %s", str)
+	}
+
+	httpPart := versionParts[0]
+	if httpPart != "HTTP" {
+		return nil, fmt.Errorf("unrecognized HTTP-version: %s", httpPart)
+	}
+	version := versionParts[1]
+	if version != "1.1" {
+		return nil, fmt.Errorf("unrecognized HTTP-version: %s", version)
+	}
+
+	return &RequestLine{
+		Method:        method,
+		RequestTarget: requestTarget,
+		HttpVersion:   version,
+	}, nil
 }
 
-func RequestFromReader(reader io.Reader) (*Request, error) {
-	entireRequest, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
+func (r *Request) parse(data []byte) (int, error) {
+	switch r.state {
+	case requestStateInitialized:
+		requestLine, n, err := parseRequestLine(data)
+		if err != nil {
+			// smthng went wrong
+			return 0, err
+		}
+		if n == 0 {
+			// just more data needed
+			return 0, nil
+		}
+		r.RequestLine = *requestLine
+		r.state = requestStateDone
+		return n, nil
+	case requestStateDone:
+		return 0, fmt.Errorf("error: trying to read data in a done state")
+	default:
+		return 0, fmt.Errorf("unknown state")
 	}
-	requestLine, err := parseRequestLine(entireRequest)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Request{
-		RequestLine: *requestLine,
-	}, nil
 }
