@@ -130,6 +130,7 @@ func TestHeadersParse(t *testing.T) {
 	_, err = RequestFromReader(reader)
 	require.Error(t, err)
 }
+
 func TestBodyParse(t *testing.T) {
 	// Test: Standard Body
 	reader := &chunkReader{

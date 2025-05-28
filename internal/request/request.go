@@ -11,11 +11,18 @@ import (
 )
 
 type Request struct {
-	RequestLine    RequestLine
-	Headers        headers.Headers
-	Body           []byte
+	RequestLine RequestLine
+	Headers     headers.Headers
+	Body        []byte
+
 	state          requestState
 	bodyLengthRead int
+}
+
+type RequestLine struct {
+	HttpVersion   string
+	RequestTarget string
+	Method        string
 }
 
 type requestState int
@@ -30,12 +37,6 @@ const (
 const crlf = "\r\n"
 const bufferSize = 8
 
-type RequestLine struct {
-	HttpVersion   string
-	RequestTarget string
-	Method        string
-}
-
 func RequestFromReader(reader io.Reader) (*Request, error) {
 	buf := make([]byte, bufferSize)
 	readToIndex := 0
@@ -44,7 +45,6 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 		Headers: headers.NewHeaders(),
 		Body:    make([]byte, 0),
 	}
-
 	for req.state != requestStateDone {
 		if readToIndex >= len(buf) {
 			newBuf := make([]byte, len(buf)*2)
@@ -56,7 +56,7 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if req.state != requestStateDone {
-					return nil, fmt.Errorf("incomplete request, in state %d, read n bytes on EOF: %d", req.state, numBytesRead)
+					return nil, fmt.Errorf("incomplete request, in state: %d, read n bytes on EOF: %d", req.state, numBytesRead)
 				}
 				break
 			}
@@ -120,7 +120,7 @@ func requestLineFromString(str string) (*RequestLine, error) {
 	return &RequestLine{
 		Method:        method,
 		RequestTarget: requestTarget,
-		HttpVersion:   version,
+		HttpVersion:   versionParts[1],
 	}, nil
 }
 
@@ -138,16 +138,17 @@ func (r *Request) parse(data []byte) (int, error) {
 	}
 	return totalBytesParsed, nil
 }
+
 func (r *Request) parseSingle(data []byte) (int, error) {
 	switch r.state {
 	case requestStateInitialized:
 		requestLine, n, err := parseRequestLine(data)
 		if err != nil {
-			// smthng went wrong
+			// something actually went wrong
 			return 0, err
 		}
 		if n == 0 {
-			// just more data needed
+			// just need more data
 			return 0, nil
 		}
 		r.RequestLine = *requestLine
@@ -171,12 +172,12 @@ func (r *Request) parseSingle(data []byte) (int, error) {
 		}
 		contentLen, err := strconv.Atoi(contentLenStr)
 		if err != nil {
-			return 0, fmt.Errorf("malformed content-length: %s", err)
+			return 0, fmt.Errorf("malformed Content-Length: %s", err)
 		}
 		r.Body = append(r.Body, data...)
 		r.bodyLengthRead += len(data)
 		if r.bodyLengthRead > contentLen {
-			return 0, fmt.Errorf("content-length too large")
+			return 0, fmt.Errorf("Content-Length too large")
 		}
 		if r.bodyLengthRead == contentLen {
 			r.state = requestStateDone
